@@ -108,20 +108,20 @@ export default function QueueStatusPage() {
   const updatedQueueItems = useMemo(() => {
     let waitingAheadCounter = 0;
 
-    const mapped = queueItems.map((item) => {
+    const mapped = [];
+    for (const item of queueItems) {
       if (item.status === "Processing") {
-        return { ...item, estimatedWait: "In Counter" };
-      }
-      if (item.status === "Completed") {
-        return { ...item, estimatedWait: "Done" };
-      }
-      if (item.status === "Waiting") {
+        mapped.push({ ...item, estimatedWait: "In Counter" });
+      } else if (item.status === "Completed") {
+        mapped.push({ ...item, estimatedWait: "Done" });
+      } else if (item.status === "Waiting") {
         const waitText = getEstimatedWaitText(waitingAheadCounter, activeCounters);
         waitingAheadCounter += 1;
-        return { ...item, estimatedWait: waitText };
+        mapped.push({ ...item, estimatedWait: waitText });
+      } else {
+        mapped.push(item);
       }
-      return item;
-    });
+    }
 
     const statusPriority: Record<QueueItem["status"], number> = {
       Processing: 1,
