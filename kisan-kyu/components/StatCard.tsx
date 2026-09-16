@@ -38,9 +38,8 @@ export default function StatCard({
 
       <div className="mt-4 border-t border-[#E5E7EB] pt-3">
         <p
-          className={`text-xs font-medium ${
-            isPositiveTrend ? "text-[#16A34A]" : "text-[#64748B]"
-          }`}
+          className={`text-xs font-medium ${isPositiveTrend ? "text-[#16A34A]" : "text-[#64748B]"
+            }`}
         >
           {trend}
         </p>
