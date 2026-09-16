@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import {
   Users,
   Wheat,
@@ -117,6 +117,10 @@ export default function DashboardPage() {
     message: string;
     tokenNumber: string;
   } | null>(null);
+  // ML prediction states
+  const [mlWaitPrediction, setMlWaitPrediction] = useState<number | null>(null);
+  const [isPredicting, setIsPredicting] = useState(false);
+  const [mlError, setMlError] = useState<string | null>(null);
 
   const activeCounters = 3;
 
@@ -162,12 +166,47 @@ export default function DashboardPage() {
     [updatedQueueItems]
   );
 
-  const currentTotalQueueCount = waitingItemsCount + currentlyProcessingCount;
+  const currentTotalQueueCount =
+    waitingItemsCount + currentlyProcessingCount;
 
-  const estimatedWaitForNewArrival = useMemo(
-    () => getEstimatedWaitText(waitingItemsCount, activeCounters),
-    [waitingItemsCount]
-  );
+  const predictWaitTime = async () => {
+    try {
+      setIsPredicting(true);
+      setMlError(null);
+
+      const response = await fetch("http://127.0.0.1:8000/predict-wait", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          market_name: "Kalavai APMC",
+          lot_size_tonnes: 2.5,
+          queue_length: waitingItemsCount,
+          farmers_ahead: waitingItemsCount,
+          active_counters: currentlyProcessingCount,
+          total_counters: activeCounters,
+          busy_counters: currentlyProcessingCount,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`ML API request failed: ${response.status}`);
+      }
+
+      const data = await response.json();
+      setMlWaitPrediction(Number(data.predicted_wait_minutes));
+    } catch (error) {
+      console.error("ML prediction error:", error);
+      setMlError("Unable to get ML prediction");
+    } finally {
+      setIsPredicting(false);
+    }
+  };
+
+  useEffect(() => {
+    predictWaitTime();
+  }, [waitingItemsCount, currentlyProcessingCount]);
 
   const todayProcuredTons = useMemo(() => {
     const total = updatedQueueItems
@@ -245,11 +284,10 @@ export default function DashboardPage() {
           <button
             type="button"
             onClick={() => setIsOnline(!isOnline)}
-            className={`flex items-center gap-2 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-all ${
-              isOnline
-                ? "border-emerald-200 bg-[#F0FDF4] text-[#16A34A] hover:bg-emerald-100"
-                : "border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100"
-            }`}
+            className={`flex items-center gap-2 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-all ${isOnline
+              ? "border-emerald-200 bg-[#F0FDF4] text-[#16A34A] hover:bg-emerald-100"
+              : "border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100"
+              }`}
           >
             {isOnline ? (
               <>
@@ -336,10 +374,16 @@ export default function DashboardPage() {
 
         <StatCard
           title="Estimated Wait"
-          value={estimatedWaitForNewArrival}
-          description="For a new farmer arrival"
+          value={
+            isPredicting
+              ? "Predicting..."
+              : mlWaitPrediction !== null
+                ? `${Math.round(mlWaitPrediction)} min`
+                : "--"
+          }
+          description={mlError ?? "LightGBM prediction for a new farmer arrival"}
           icon={Clock3}
-          trend={`Based on ${activeCounters} active counters`}
+          trend={`ML prediction based on ${waitingItemsCount} waiting`}
         />
 
         <StatCard
@@ -406,7 +450,11 @@ export default function DashboardPage() {
               <div>
                 <p className="text-xs text-[#64748B]">Estimated Waiting Time</p>
                 <p className="text-3xl font-extrabold text-[#0F172A] tracking-tight mt-1">
-                  {estimatedWaitForNewArrival}
+                  {isPredicting
+                    ? "Predicting..."
+                    : mlWaitPrediction !== null
+                      ? `${Math.round(mlWaitPrediction)} min`
+                      : "--"}
                 </p>
               </div>
               <div className="text-right">

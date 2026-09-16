@@ -1,96 +1,271 @@
-import pandas as pd
 from pathlib import Path
+from datetime import datetime
 
-DATA_PATH = Path("dataset/kisan_kyu_queue_dataset.csv")
-
-print("=" * 70)
-print("KISAN KYU ML DATASET INSPECTION")
-print("=" * 70)
-
-
-print("\nLoading dataset...")
-
-df = pd.read_csv(DATA_PATH)
-
-print(f"Loaded successfully.")
-print(f"Rows    : {len(df):,}")
-print(f"Columns : {len(df.columns)}")
+import joblib
+import numpy as np
+import pandas as pd
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
 
-df["date"] = pd.to_datetime(df["date"])
-df["arrival_timestamp"] = pd.to_datetime(df["arrival_timestamp"])
+BASE_DIR = Path(__file__).resolve().parent.parent
 
-print("\n" + "=" * 70)
-print("DATE RANGE")
-print("=" * 70)
+MODEL_PATH = BASE_DIR / "models" / "kisan_kyu_wait_model.pkl"
+DATASET_PATH = BASE_DIR / "dataset" / "kisan_kyu_queue_dataset.csv"
 
-print(f"Minimum date : {df['date'].min().date()}")
-print(f"Maximum date : {df['date'].max().date()}")
+model = joblib.load(MODEL_PATH)
 
-print("\n" + "=" * 70)
-print("TARGET")
-print("=" * 70)
+dataset = pd.read_csv(DATASET_PATH)
 
-target = "waiting_time_minutes"
+dataset["date"] = pd.to_datetime(dataset["date"], errors="coerce")
 
-print(f"Target column : {target}")
-print(f"Mean          : {df[target].mean():.2f} minutes")
-print(f"Median        : {df[target].median():.2f} minutes")
-print(f"Minimum       : {df[target].min():.2f} minutes")
-print(f"Maximum       : {df[target].max():.2f} minutes")
-
-print("\n" + "=" * 70)
-print("RECORDS BY YEAR")
-print("=" * 70)
-
-year_counts = df["date"].dt.year.value_counts().sort_index()
-
-print(year_counts.to_string())
-
-print("\n" + "=" * 70)
-print("MISSING VALUES")
-print("=" * 70)
-
-missing = df.isna().sum()
-missing = missing[missing > 0].sort_values(ascending=False)
-
-if len(missing) == 0:
-    print("No missing values.")
-else:
-    print(missing.to_string())
+dataset = dataset.sort_values("date").reset_index(drop=True)
 
 
-print("\n" + "=" * 70)
-print("LEAKAGE COLUMNS")
-print("=" * 70)
+app = FastAPI(
+    title="Kisan Kyu ML API",
+    description="Waiting time prediction service for Kisan Kyu",
+    version="1.0.0",
+)
 
-leakage_columns = [
-    "processing_start_timestamp",
-    "processing_end_timestamp",
-    "processing_time_minutes",
-]
 
-for column in leakage_columns:
-    print(f"BLOCKED → {column}")
+class WaitPredictionRequest(BaseModel):
+    market_name: str
 
-print("\n" + "=" * 70)
-print("PREDICTION FEATURES")
-print("=" * 70)
+    lot_size_tonnes: float
 
-blocked = set(leakage_columns)
+    queue_length: int
+    farmers_ahead: int
 
-blocked.add(target)
-blocked.add("farmer_number")
+    active_counters: int
+    total_counters: int
+    busy_counters: int
 
-features = [
-    column
-    for column in df.columns
-    if column not in blocked
-]
+    prediction_date: str | None = None
 
-for i, column in enumerate(features, 1):
-    print(f"{i:2}. {column}")
 
-print("\n" + "=" * 70)
-print("INSPECTION COMPLETE")
-print("=" * 70)
+@app.get("/")
+def root():
+    return {
+        "service": "Kisan Kyu ML API",
+        "status": "running",
+        "model": "LightGBM",
+    }
+
+def get_historical_features(market_name: str, prediction_date: pd.Timestamp):
+
+    market_data = dataset[
+        dataset["market_name"].str.lower()
+        == market_name.lower()
+    ].copy()
+
+    if market_data.empty:
+        market_data = dataset.copy()
+
+    market_data = market_data[
+        market_data["date"] < prediction_date
+    ].sort_values("date")
+
+    if market_data.empty:
+        market_data = dataset[
+            dataset["market_name"].str.lower()
+            == market_name.lower()
+        ].copy()
+
+    arrivals = pd.to_numeric(
+        market_data["historical_arrivals_tonnes"],
+        errors="coerce"
+    )
+
+    prices = pd.to_numeric(
+        market_data["avg_modal_price"],
+        errors="coerce"
+    )
+
+    arrivals = arrivals.dropna()
+
+    if len(arrivals) == 0:
+        historical_arrivals = 0.0
+        arrival_lag_1d = 0.0
+        arrival_avg_7d = 0.0
+        arrival_avg_14d = 0.0
+        arrival_avg_30d = 0.0
+        arrival_max_7d = 0.0
+    else:
+        historical_arrivals = float(arrivals.iloc[-1])
+
+        arrival_lag_1d = (
+            float(arrivals.iloc[-2])
+            if len(arrivals) >= 2
+            else historical_arrivals
+        )
+
+        arrival_avg_7d = float(arrivals.tail(7).mean())
+        arrival_avg_14d = float(arrivals.tail(14).mean())
+        arrival_avg_30d = float(arrivals.tail(30).mean())
+        arrival_max_7d = float(arrivals.tail(7).max())
+
+    prices = prices.dropna()
+
+    if len(prices) > 0:
+        avg_modal_price = float(prices.tail(30).mean())
+    else:
+        avg_modal_price = 0.0
+
+    return {
+        "historical_arrivals_tonnes": historical_arrivals,
+        "arrival_lag_1d": arrival_lag_1d,
+        "arrival_avg_7d": arrival_avg_7d,
+        "arrival_avg_14d": arrival_avg_14d,
+        "arrival_avg_30d": arrival_avg_30d,
+        "arrival_max_7d": arrival_max_7d,
+        "avg_modal_price": avg_modal_price,
+    }
+
+@app.post("/predict-wait")
+def predict_wait(request: WaitPredictionRequest):
+
+    try:
+
+        if request.prediction_date:
+            prediction_date = pd.to_datetime(
+                request.prediction_date
+            )
+        else:
+            prediction_date = pd.Timestamp.now().normalize()
+
+
+        historical = get_historical_features(
+            request.market_name,
+            prediction_date,
+        )
+
+
+        month = prediction_date.month
+        day_of_week = prediction_date.dayofweek
+        day_of_year = prediction_date.dayofyear
+
+        month_sin = np.sin(
+            2 * np.pi * month / 12
+        )
+
+        month_cos = np.cos(
+            2 * np.pi * month / 12
+        )
+
+        dow_sin = np.sin(
+            2 * np.pi * day_of_week / 7
+        )
+
+        dow_cos = np.cos(
+            2 * np.pi * day_of_week / 7
+        )
+        data = {
+            "market_name": request.market_name,
+            "lot_size_tonnes": request.lot_size_tonnes,
+
+            "queue_length": request.queue_length,
+            "farmers_ahead": request.farmers_ahead,
+
+            "active_counters": request.active_counters,
+            "total_counters": request.total_counters,
+            "busy_counters": request.busy_counters,
+
+            "historical_arrivals_tonnes":
+                historical["historical_arrivals_tonnes"],
+
+            "arrival_lag_1d":
+                historical["arrival_lag_1d"],
+
+            "arrival_avg_7d":
+                historical["arrival_avg_7d"],
+
+            "arrival_avg_14d":
+                historical["arrival_avg_14d"],
+
+            "arrival_avg_30d":
+                historical["arrival_avg_30d"],
+
+            "arrival_max_7d":
+                historical["arrival_max_7d"],
+
+            "avg_modal_price":
+                historical["avg_modal_price"],
+
+            "month": month,
+            "day_of_week": day_of_week,
+            "day_of_year": day_of_year,
+
+            "month_sin": month_sin,
+            "month_cos": month_cos,
+
+            "dow_sin": dow_sin,
+            "dow_cos": dow_cos,
+        }
+
+        df = pd.DataFrame([data])
+
+        df["market_name"] = df["market_name"].astype("category")
+
+
+        feature_columns = [
+            "market_name",
+            "lot_size_tonnes",
+            "queue_length",
+            "farmers_ahead",
+            "active_counters",
+            "total_counters",
+            "busy_counters",
+            "historical_arrivals_tonnes",
+            "arrival_lag_1d",
+            "arrival_avg_7d",
+            "arrival_avg_14d",
+            "arrival_avg_30d",
+            "arrival_max_7d",
+            "avg_modal_price",
+            "month",
+            "day_of_week",
+            "day_of_year",
+            "month_sin",
+            "month_cos",
+            "dow_sin",
+            "dow_cos",
+        ]
+
+        df = df[feature_columns]
+
+        prediction = model.predict(df)[0]
+
+        prediction = max(
+            0.0,
+            float(prediction)
+        )
+
+        return {
+            "predicted_wait_minutes": round(
+                prediction,
+                2
+            ),
+
+            "predicted_wait_display":
+                f"{round(prediction)} minutes",
+
+            "queue_length":
+                request.queue_length,
+
+            "farmers_ahead":
+                request.farmers_ahead,
+
+            "market_name":
+                request.market_name,
+
+            "prediction_date":
+                prediction_date.strftime("%Y-%m-%d"),
+        }
+
+    except Exception as error:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(error)
+        )
